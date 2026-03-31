@@ -10,6 +10,7 @@ import { collection, doc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch } f
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
 const ADMIN_PASSWORD = "AlifeHG2026";
+const RECIPE_PASSWORD = "AlifeKitchen2026";
 
 const CATEGORIES = [
   { id: "sops", label: "SOPs", icon: FileText, color: "#C8952A", desc: "Standard Operating Procedures" },
@@ -97,6 +98,11 @@ export default function AlifePortal() {
   const emptyForm = { title:"", category:"sops", subcategory:"", content:"", tags:"", locations:["All Locations"], roles:["All Staff"], featured:false, fileName:"", fileURL:"", fileType:"" };
   const [form, setForm] = useState(emptyForm);
   const [pendingFile, setPendingFile] = useState(null);
+  const [recipesUnlocked, setRecipesUnlocked] = useState(false);
+  const [showRecipeLock, setShowRecipeLock] = useState(false);
+  const [recipePwInput, setRecipePwInput] = useState("");
+  const [recipePwError, setRecipePwError] = useState(false);
+  const [recipeLockTarget, setRecipeLockTarget] = useState(null); // "category" or a doc object
 
   useEffect(() => {
     const colRef = collection(db, "documents");
@@ -132,12 +138,13 @@ export default function AlifePortal() {
     if (!query.trim()) return [];
     const q = query.toLowerCase();
     return docs.filter(d => {
+      if (d.category === "recipes" && !recipesUnlocked && !isAdmin) return false;
       const loc = locFilter === "All Locations" || (d.locations || []).includes("All Locations") || (d.locations || []).includes(locFilter);
       const role = roleFilter === "All Staff" || (d.roles || []).includes("All Staff") || (d.roles || []).includes(roleFilter);
       const match = d.title.toLowerCase().includes(q) || (d.content || "").toLowerCase().includes(q) || (d.tags || []).some(t => t.toLowerCase().includes(q)) || (d.subcategory || "").toLowerCase().includes(q);
       return loc && role && match;
     });
-  }, [docs, query, locFilter, roleFilter]);
+  }, [docs, query, locFilter, roleFilter, recipesUnlocked, isAdmin]);
 
   const filteredByCat = useCallback((catId) => {
     return docs.filter(d => {
@@ -205,9 +212,24 @@ export default function AlifePortal() {
   const toggleLocForm = (loc) => setForm(f => ({ ...f, locations: f.locations.includes(loc) ? f.locations.filter(l => l !== loc) : [...f.locations, loc] }));
   const toggleRoleForm = (role) => setForm(f => ({ ...f, roles: f.roles.includes(role) ? f.roles.filter(r => r !== role) : [...f.roles, role] }));
   const goHome = () => { setView("home"); setSelCat(null); setSelDoc(null); setQuery(""); };
-  const goCategory = (cat) => { setSelCat(cat); setView("category"); setSelDoc(null); };
-  const goDoc = (doc) => { setSelDoc(doc); setView("doc"); };
+  const goCategory = (cat) => {
+    if (cat === "recipes" && !recipesUnlocked && !isAdmin) { setRecipeLockTarget("category"); setShowRecipeLock(true); return; }
+    setSelCat(cat); setView("category"); setSelDoc(null);
+  };
+  const goDoc = (docObj) => {
+    if (docObj.category === "recipes" && !recipesUnlocked && !isAdmin) { setRecipeLockTarget(docObj); setShowRecipeLock(true); return; }
+    setSelDoc(docObj); setView("doc");
+  };
   const goSearch = (q) => { setQuery(q); setView("search"); };
+
+  const handleRecipeUnlock = () => {
+    if (recipePwInput === RECIPE_PASSWORD) {
+      setRecipesUnlocked(true); setShowRecipeLock(false); setRecipePwInput(""); setRecipePwError(false);
+      if (recipeLockTarget === "category") { setSelCat("recipes"); setView("category"); setSelDoc(null); }
+      else if (recipeLockTarget && typeof recipeLockTarget === "object") { setSelDoc(recipeLockTarget); setView("doc"); }
+      setRecipeLockTarget(null);
+    } else { setRecipePwError(true); }
+  };
 
   const s = {
     wrap: { fontFamily:"'Barlow', sans-serif", background:"#0F0F0F", minHeight:"100vh", color:"#F7F5F0", display:"flex", flexDirection:"column" },
@@ -274,11 +296,11 @@ export default function AlifePortal() {
 
   const FilterBar = () => (<div style={s.filterBar}><span style={s.filterLabel}>Filter by</span><select style={s.select} value={locFilter} onChange={e => setLocFilter(e.target.value)}>{LOCATIONS.map(l => <option key={l}>{l}</option>)}</select><select style={s.select} value={roleFilter} onChange={e => setRoleFilter(e.target.value)}>{ROLES.map(r => <option key={r}>{r}</option>)}</select>{(locFilter !== "All Locations" || roleFilter !== "All Staff") && <button className="btn-hover" style={s.btn("ghost")} onClick={() => { setLocFilter("All Locations"); setRoleFilter("All Staff"); }}><X size={12}/> Clear</button>}<span style={{marginLeft:"auto", fontSize:12, color:"#555"}}>{docs.length} documents loaded</span></div>);
 
-  const HomeView = () => { const featured = docs.filter(d => d.featured).slice(0, 8); const recent = [...docs].sort((a,b) => b.lastUpdated.localeCompare(a.lastUpdated)).slice(0, 5); return (
+  const HomeView = () => { const hideRecipes = !recipesUnlocked && !isAdmin; const featured = docs.filter(d => d.featured && !(hideRecipes && d.category === "recipes")).slice(0, 8); const recent = [...docs].filter(d => !(hideRecipes && d.category === "recipes")).sort((a,b) => b.lastUpdated.localeCompare(a.lastUpdated)).slice(0, 5); return (
     <div>
       <div style={{marginBottom:32}}><div style={{fontFamily:"'Bebas Neue',sans-serif", fontSize:38, letterSpacing:3, marginBottom:6}}><span style={{color:"#C8952A"}}>ALIFE</span> KNOWLEDGE BASE</div><div style={{color:"#888", fontSize:15}}>{docs.length} documents across {CATEGORIES.length} categories \u2014 search or browse below.</div></div>
       <div style={s.sectionTitle}>Browse by Category</div>
-      <div style={s.catGrid}>{CATEGORIES.map(cat => { const Icon = cat.icon; const count = filteredByCat(cat.id).length; return (<div key={cat.id} className="cat-card-hover" style={s.catCard()} onClick={() => goCategory(cat.id)}><Icon size={22} color={cat.color}/><div style={{fontFamily:"'Bebas Neue',sans-serif", fontSize:18, letterSpacing:1.5, color:"#F7F5F0"}}>{cat.label}</div><div style={{fontSize:12, color:"#666"}}>{cat.desc}</div><div style={{fontSize:12, color:cat.color, fontWeight:600, marginTop:4}}>{count} doc{count !== 1 ? "s" : ""}</div></div>); })}</div>
+      <div style={s.catGrid}>{CATEGORIES.map(cat => { const Icon = cat.icon; const count = filteredByCat(cat.id).length; const locked = cat.id === "recipes" && !recipesUnlocked && !isAdmin; return (<div key={cat.id} className="cat-card-hover" style={s.catCard()} onClick={() => goCategory(cat.id)}><div style={{display:"flex", alignItems:"center", justifyContent:"space-between"}}><Icon size={22} color={cat.color}/>{locked && <Lock size={14} color="#666"/>}</div><div style={{fontFamily:"'Bebas Neue',sans-serif", fontSize:18, letterSpacing:1.5, color:"#F7F5F0"}}>{cat.label}{locked ? " 🔒" : ""}</div><div style={{fontSize:12, color:"#666"}}>{cat.desc}</div><div style={{fontSize:12, color:cat.color, fontWeight:600, marginTop:4}}>{count} doc{count !== 1 ? "s" : ""}</div></div>); })}</div>
       {featured.length > 0 && (<><div style={{...s.sectionTitle, display:"flex", alignItems:"center", gap:8}}><Star size={16} color="#C8952A"/> Featured Documents</div><div style={{...s.docList, marginBottom:32}}>{featured.map(d => <DocCard key={d.id} doc={d}/>)}</div></>)}
       <div style={s.sectionTitle}>Recently Updated</div>
       <div style={s.docList}>{recent.map(d => <DocCard key={d.id} doc={d}/>)}</div>
@@ -385,6 +407,7 @@ export default function AlifePortal() {
       </div>
       {showLogin && (<div style={s.modal} onClick={() => setShowLogin(false)}><div style={s.modalBox} onClick={e => e.stopPropagation()}><div style={{fontFamily:"'Bebas Neue',sans-serif", fontSize:22, letterSpacing:2, color:"#C8952A", marginBottom:4}}>ADMIN LOGIN</div><div style={{fontSize:13, color:"#666", marginBottom:20}}>Management & content administrators only.</div><input type="password" style={{...s.input, marginBottom:12}} placeholder="Enter admin password" value={pwInput} onChange={e => { setPwInput(e.target.value); setPwError(false); }} onKeyDown={e => e.key === "Enter" && handleLogin()} />{pwError && <div style={{color:"#B03A2E", fontSize:12, marginBottom:10}}>Incorrect password.</div>}<div style={{display:"flex", gap:10}}><button className="btn-hover" style={{...s.btn("gold"), flex:1}} onClick={handleLogin}><LogIn size={14}/> Login</button><button className="btn-hover" style={s.btn("ghost")} onClick={() => setShowLogin(false)}>Cancel</button></div></div></div>)}
       {deleteConfirm && (<div style={s.modal} onClick={() => setDeleteConfirm(null)}><div style={s.modalBox} onClick={e => e.stopPropagation()}><AlertTriangle size={24} color="#B03A2E" style={{marginBottom:12}}/><div style={{fontWeight:700, fontSize:16, marginBottom:8}}>Delete Document?</div><div style={{fontSize:13, color:"#888", marginBottom:20}}>"<strong style={{color:"#F7F5F0"}}>{deleteConfirm.title}</strong>" will be permanently removed.</div><div style={{display:"flex", gap:10}}><button className="btn-hover" style={{...s.btn("danger"), flex:1}} onClick={() => handleDelete(deleteConfirm.id)}><Trash2 size={13}/> Delete</button><button className="btn-hover" style={s.btn("ghost")} onClick={() => setDeleteConfirm(null)}>Cancel</button></div></div></div>)}
+      {showRecipeLock && (<div style={s.modal} onClick={() => { setShowRecipeLock(false); setRecipeLockTarget(null); }}><div style={s.modalBox} onClick={e => e.stopPropagation()}><Lock size={24} color="#C8952A" style={{marginBottom:12}}/><div style={{fontFamily:"'Bebas Neue',sans-serif", fontSize:22, letterSpacing:2, color:"#C8952A", marginBottom:4}}>RECIPES LOCKED</div><div style={{fontSize:13, color:"#888", marginBottom:20}}>Recipe content is proprietary. Enter the recipe password to continue.</div><input type="password" style={{...s.input, marginBottom:12}} placeholder="Enter recipe password" value={recipePwInput} onChange={e => { setRecipePwInput(e.target.value); setRecipePwError(false); }} onKeyDown={e => e.key === "Enter" && handleRecipeUnlock()} />{recipePwError && <div style={{color:"#B03A2E", fontSize:12, marginBottom:10}}>Incorrect password.</div>}<div style={{display:"flex", gap:10}}><button className="btn-hover" style={{...s.btn("gold"), flex:1}} onClick={handleRecipeUnlock}><Lock size={14}/> Unlock Recipes</button><button className="btn-hover" style={s.btn("ghost")} onClick={() => { setShowRecipeLock(false); setRecipeLockTarget(null); }}>Cancel</button></div></div></div>)}
       {saveMsg && <div style={s.toast}>{saveMsg}</div>}
     </div>
   );
