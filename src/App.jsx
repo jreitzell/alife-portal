@@ -5,6 +5,8 @@ import {
   MapPin, Clock, Tag, X, ChevronRight, Lock, Save,
   AlertTriangle, Star, Menu, Eye, Hash
 } from "lucide-react";
+import { db } from './firebase.js';
+import { collection, doc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch } from 'firebase/firestore';
 
 const ADMIN_PASSWORD = "AlifeHG2026";
 
@@ -93,18 +95,34 @@ export default function AlifePortal() {
   const [form, setForm] = useState(emptyForm);
 
   useEffect(() => {
-    function load() {
-      try {
-        const stored = localStorage.getItem("alife-portal-docs-v3");
-        if (stored) { setDocs(JSON.parse(stored)); }
-        else { setDocs(SEED_DOCS); localStorage.setItem("alife-portal-docs-v3", JSON.stringify(SEED_DOCS)); }
-      } catch { setDocs(SEED_DOCS); }
+    const colRef = collection(db, "documents");
+    // Real-time listener: any admin change updates ALL connected browsers instantly
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      if (snapshot.empty) {
+        // First time: seed the database with all 22 docs
+        const seedDB = async () => {
+          const batch = writeBatch(db);
+          SEED_DOCS.forEach(d => {
+            batch.set(doc(db, "documents", d.id), d);
+          });
+          await batch.commit();
+        };
+        seedDB();
+      } else {
+        const loaded = snapshot.docs.map(d => d.data());
+        setDocs(loaded);
+      }
       setLoading(false);
-    }
-    load();
+    }, (error) => {
+      console.error("Firebase error:", error);
+      // Fallback to seed docs if Firebase fails
+      setDocs(SEED_DOCS);
+      setLoading(false);
+    });
+    return () => unsubscribe();
   }, []);
 
-  const saveDocs = useCallback(async (updated) => { setDocs(updated); try { localStorage.setItem("alife-portal-docs-v3", JSON.stringify(updated)); } catch(e) { console.error(e); } }, []);
+  const saveDocs = useCallback(async (updated) => { setDocs(updated); }, []);
 
   const searchResults = useCallback(() => {
     if (!query.trim()) return [];
@@ -133,14 +151,18 @@ export default function AlifePortal() {
     if (!form.title.trim() || !form.content.trim()) return;
     const now = new Date().toISOString().slice(0, 10);
     const newDoc = { id: editDoc ? editDoc.id : uid(), title: form.title.trim(), category: form.category, subcategory: form.subcategory, content: form.content, tags: form.tags.split(",").map(t => t.trim()).filter(Boolean), locations: form.locations.length ? form.locations : ["All Locations"], roles: form.roles.length ? form.roles : ["All Staff"], featured: form.featured, lastUpdated: now, createdBy: "Admin" };
-    let updated;
-    if (editDoc) { updated = docs.map(d => d.id === editDoc.id ? newDoc : d); } else { updated = [newDoc, ...docs]; }
-    await saveDocs(updated);
+    try {
+      await setDoc(doc(db, "documents", newDoc.id), newDoc);
+    } catch(e) { console.error("Save error:", e); }
     setSaveMsg("Saved!"); setTimeout(() => setSaveMsg(""), 2000);
     setView("admin");
   };
 
-  const handleDelete = async (id) => { await saveDocs(docs.filter(d => d.id !== id)); setDeleteConfirm(null); if (selDoc?.id === id) { setSelDoc(null); setView("home"); } };
+  const handleDelete = async (id) => {
+    try { await deleteDoc(doc(db, "documents", id)); } catch(e) { console.error("Delete error:", e); }
+    setDeleteConfirm(null);
+    if (selDoc?.id === id) { setSelDoc(null); setView("home"); }
+  };
   const toggleLocForm = (loc) => setForm(f => ({ ...f, locations: f.locations.includes(loc) ? f.locations.filter(l => l !== loc) : [...f.locations, loc] }));
   const toggleRoleForm = (role) => setForm(f => ({ ...f, roles: f.roles.includes(role) ? f.roles.filter(r => r !== role) : [...f.roles, role] }));
   const goHome = () => { setView("home"); setSelCat(null); setSelDoc(null); setQuery(""); };
