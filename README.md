@@ -14,12 +14,19 @@ Admin changes now sync across ALL devices in real time.
 4. Google Analytics: you can turn this OFF (not needed) → click **Continue**
 5. Wait for the project to create, then click **Continue**
 
-### Step 2: Create the Database
+### Step 2: Create the Database AND Enable Storage
 
+**Database:**
 1. In the left sidebar, click **"Build"** → **"Firestore Database"**
 2. Click **"Create database"**
 3. Select a location (choose **nam5 (us-central)** for Houston)
 4. Select **"Start in test mode"** → click **Create**
+
+**Storage (for file uploads):**
+1. In the left sidebar, click **"Build"** → **"Storage"**
+2. Click **"Get started"**
+3. Select **"Start in test mode"** → click **Next**
+4. Keep the default location → click **Done**
 
 ⚠️ **Important:** Test mode allows open access for 30 days. That's fine for now — I can help you add security rules later.
 
@@ -95,8 +102,9 @@ Change it, commit to GitHub, Vercel auto-redeploys.
 
 ## 30-Day Security Reminder
 
-Firebase test mode expires after 30 days. When that happens, go to:
-**Firebase Console → Firestore → Rules** and paste:
+Firebase test mode expires after 30 days. When that happens:
+
+**Firestore Rules** — Go to Firebase Console → Firestore → Rules and paste:
 
 ```
 rules_version = '2';
@@ -110,4 +118,18 @@ service cloud.firestore {
 }
 ```
 
-This keeps it open for your use case (no user accounts needed). Click **Publish**.
+**Storage Rules** — Go to Firebase Console → Storage → Rules and paste:
+
+```
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /documents/{allPaths=**} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}
+```
+
+Click **Publish** on each. This keeps it open for your use case.

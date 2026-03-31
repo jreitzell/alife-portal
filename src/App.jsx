@@ -5,8 +5,9 @@ import {
   MapPin, Clock, Tag, X, ChevronRight, Lock, Save,
   AlertTriangle, Star, Menu, Eye, Hash
 } from "lucide-react";
-import { db } from './firebase.js';
+import { db, storage } from './firebase.js';
 import { collection, doc, getDocs, setDoc, deleteDoc, onSnapshot, writeBatch } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
 const ADMIN_PASSWORD = "AlifeHG2026";
 
@@ -90,9 +91,12 @@ export default function AlifePortal() {
   const [editDoc, setEditDoc] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [saveMsg, setSaveMsg] = useState("");
+  const [uploading, setUploading] = useState(false);
   const searchRef = useRef(null);
-  const emptyForm = { title:"", category:"sops", subcategory:"", content:"", tags:"", locations:["All Locations"], roles:["All Staff"], featured:false };
+  const fileInputRef = useRef(null);
+  const emptyForm = { title:"", category:"sops", subcategory:"", content:"", tags:"", locations:["All Locations"], roles:["All Staff"], featured:false, fileName:"", fileURL:"", fileType:"" };
   const [form, setForm] = useState(emptyForm);
+  const [pendingFile, setPendingFile] = useState(null);
 
   useEffect(() => {
     const colRef = collection(db, "documents");
@@ -144,21 +148,56 @@ export default function AlifePortal() {
   }, [docs, locFilter, roleFilter]);
 
   const handleLogin = () => { if (pwInput === ADMIN_PASSWORD) { setIsAdmin(true); setShowLogin(false); setPwInput(""); setPwError(false); } else { setPwError(true); } };
-  const openNew = () => { setForm(emptyForm); setEditDoc(null); setView("edit"); };
-  const openEdit = (doc) => { setForm({ title: doc.title, category: doc.category, subcategory: doc.subcategory || "", content: doc.content, tags: (doc.tags || []).join(", "), locations: doc.locations || ["All Locations"], roles: doc.roles || ["All Staff"], featured: doc.featured || false }); setEditDoc(doc); setView("edit"); };
+  const openNew = () => { setForm(emptyForm); setEditDoc(null); setPendingFile(null); setView("edit"); };
+  const openEdit = (doc) => { setForm({ title: doc.title, category: doc.category, subcategory: doc.subcategory || "", content: doc.content || "", tags: (doc.tags || []).join(", "), locations: doc.locations || ["All Locations"], roles: doc.roles || ["All Staff"], featured: doc.featured || false, fileName: doc.fileName || "", fileURL: doc.fileURL || "", fileType: doc.fileType || "" }); setEditDoc(doc); setPendingFile(null); setView("edit"); };
 
   const handleSave = async () => {
-    if (!form.title.trim() || !form.content.trim()) return;
+    if (!form.title.trim() || (!form.content.trim() && !pendingFile && !form.fileURL)) return;
+    setUploading(true);
     const now = new Date().toISOString().slice(0, 10);
-    const newDoc = { id: editDoc ? editDoc.id : uid(), title: form.title.trim(), category: form.category, subcategory: form.subcategory, content: form.content, tags: form.tags.split(",").map(t => t.trim()).filter(Boolean), locations: form.locations.length ? form.locations : ["All Locations"], roles: form.roles.length ? form.roles : ["All Staff"], featured: form.featured, lastUpdated: now, createdBy: "Admin" };
-    try {
-      await setDoc(doc(db, "documents", newDoc.id), newDoc);
-    } catch(e) { console.error("Save error:", e); }
+    let fileName = form.fileName || "";
+    let fileURL = form.fileURL || "";
+    let fileType = form.fileType || "";
+
+    // Upload new file if one is pending
+    if (pendingFile) {
+      try {
+        const docId = editDoc ? editDoc.id : uid();
+        const ext = pendingFile.name.split('.').pop().toLowerCase();
+        const storageRef = ref(storage, `documents/${docId}/${pendingFile.name}`);
+        await uploadBytes(storageRef, pendingFile);
+        fileURL = await getDownloadURL(storageRef);
+        fileName = pendingFile.name;
+        fileType = ext;
+
+        // If editing and replacing an old file, delete the old one
+        if (editDoc && editDoc.fileURL && editDoc.fileName) {
+          try {
+            const oldRef = ref(storage, `documents/${editDoc.id}/${editDoc.fileName}`);
+            await deleteObject(oldRef);
+          } catch(e) { /* old file may not exist */ }
+        }
+
+        const newDoc = { id: editDoc ? editDoc.id : docId, title: form.title.trim(), category: form.category, subcategory: form.subcategory, content: form.content, tags: form.tags.split(",").map(t => t.trim()).filter(Boolean), locations: form.locations.length ? form.locations : ["All Locations"], roles: form.roles.length ? form.roles : ["All Staff"], featured: form.featured, lastUpdated: now, createdBy: "Admin", fileName, fileURL, fileType };
+        await setDoc(doc(db, "documents", newDoc.id), newDoc);
+      } catch(e) { console.error("Upload error:", e); }
+    } else {
+      const newDoc = { id: editDoc ? editDoc.id : uid(), title: form.title.trim(), category: form.category, subcategory: form.subcategory, content: form.content, tags: form.tags.split(",").map(t => t.trim()).filter(Boolean), locations: form.locations.length ? form.locations : ["All Locations"], roles: form.roles.length ? form.roles : ["All Staff"], featured: form.featured, lastUpdated: now, createdBy: "Admin", fileName, fileURL, fileType };
+      try { await setDoc(doc(db, "documents", newDoc.id), newDoc); } catch(e) { console.error("Save error:", e); }
+    }
+
+    setUploading(false);
+    setPendingFile(null);
     setSaveMsg("Saved!"); setTimeout(() => setSaveMsg(""), 2000);
     setView("admin");
   };
 
   const handleDelete = async (id) => {
+    // Also delete file from storage if one exists
+    const docToDelete = docs.find(d => d.id === id);
+    if (docToDelete && docToDelete.fileURL && docToDelete.fileName) {
+      try { await deleteObject(ref(storage, `documents/${id}/${docToDelete.fileName}`)); } catch(e) { /* file may not exist */ }
+    }
     try { await deleteDoc(doc(db, "documents", id)); } catch(e) { console.error("Delete error:", e); }
     setDeleteConfirm(null);
     if (selDoc?.id === id) { setSelDoc(null); setView("home"); }
@@ -221,6 +260,7 @@ export default function AlifePortal() {
         <div style={s.docMeta}>
           <span style={s.pill(cat.color)}><Icon size={10}/> {cat.label}</span>
           {doc.subcategory && <span style={s.tag}>{doc.subcategory}</span>}
+          {doc.fileURL && <span style={{...s.tag, color:"#5CB85C", background:"#5CB85C22"}}>📎 {doc.fileType?.toUpperCase()}</span>}
           {(doc.locations||[]).includes("All Locations") ? null : (doc.locations||[]).slice(0,2).map(l => <span key={l} style={{...s.tag, color:"#C8952A"}}>{l}</span>)}
           <span style={{...s.tag, marginLeft:"auto"}}><Clock size={10} style={{display:"inline",marginRight:3}}/>{timeAgo(doc.lastUpdated)}</span>
         </div>
@@ -265,7 +305,32 @@ export default function AlifePortal() {
         <div style={{marginTop:12, display:"flex", gap:16, fontSize:12, color:"#555", flexWrap:"wrap"}}><span><Clock size={11} style={{display:"inline",marginRight:4}}/>Updated {timeAgo(selDoc.lastUpdated)}</span>{(selDoc.tags||[]).length > 0 && <span><Tag size={11} style={{display:"inline",marginRight:4}}/>{(selDoc.tags||[]).join(", ")}</span>}</div>
       </div>
       <style>{docCSS}</style>
-      <div style={s.docContent} dangerouslySetInnerHTML={{__html: renderContent(selDoc.content)}}/>
+      {selDoc.content && <div style={s.docContent} dangerouslySetInnerHTML={{__html: renderContent(selDoc.content)}}/>}
+      {selDoc.fileURL && (
+        <div style={{marginTop: selDoc.content ? 28 : 0}}>
+          {selDoc.fileType === "pdf" ? (
+            <div>
+              <div style={{fontSize:12, color:"#C8952A", fontWeight:700, letterSpacing:2, textTransform:"uppercase", marginBottom:12}}>Attached Document</div>
+              <iframe src={selDoc.fileURL} style={{width:"100%", height:600, border:"1px solid #2A2A2A", borderRadius:8, background:"#fff"}} title={selDoc.fileName}/>
+              <div style={{marginTop:8}}><a href={selDoc.fileURL} target="_blank" rel="noopener noreferrer" style={{color:"#C8952A", fontSize:13, fontWeight:600, textDecoration:"none"}}>Open PDF in new tab &rarr;</a></div>
+            </div>
+          ) : (selDoc.fileType === "png" || selDoc.fileType === "jpg" || selDoc.fileType === "jpeg" || selDoc.fileType === "gif") ? (
+            <div>
+              <div style={{fontSize:12, color:"#C8952A", fontWeight:700, letterSpacing:2, textTransform:"uppercase", marginBottom:12}}>Attached Image</div>
+              <img src={selDoc.fileURL} alt={selDoc.fileName} style={{maxWidth:"100%", borderRadius:8, border:"1px solid #2A2A2A"}}/>
+            </div>
+          ) : (
+            <div style={{background:"#1A1A1A", border:"1px solid #2A2A2A", borderRadius:10, padding:20, display:"flex", alignItems:"center", gap:14}}>
+              <FileText size={28} color="#C8952A"/>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:600, fontSize:14, marginBottom:4}}>{selDoc.fileName}</div>
+                <div style={{fontSize:12, color:"#666"}}>{selDoc.fileType.toUpperCase()} file</div>
+              </div>
+              <a href={selDoc.fileURL} target="_blank" rel="noopener noreferrer" style={{textDecoration:"none"}}><button className="btn-hover" style={s.btn("gold")}>Download</button></a>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{marginTop:40, paddingTop:20, borderTop:"1px solid #2A2A2A"}}><button className="btn-hover" style={s.btn("ghost")} onClick={() => view === "search" ? goSearch(query) : goCategory(selDoc.category)}><ArrowLeft size={14}/> Back</button></div>
     </div>
   ); };
@@ -293,8 +358,17 @@ export default function AlifePortal() {
     <div style={s.formGroup}><label style={s.label}>Locations</label><div style={{display:"flex", flexWrap:"wrap", gap:8}}>{LOCATIONS.map(loc => <button key={loc} style={s.multiChip(form.locations.includes(loc))} onClick={() => toggleLocForm(loc)}>{loc}</button>)}</div></div>
     <div style={s.formGroup}><label style={s.label}>Audience / Roles</label><div style={{display:"flex", flexWrap:"wrap", gap:8}}>{ROLES.map(role => <button key={role} style={s.multiChip(form.roles.includes(role))} onClick={() => toggleRoleForm(role)}>{role}</button>)}</div></div>
     <div style={s.formGroup}><div style={{display:"flex", alignItems:"center", gap:10, marginBottom:6}}><label style={{...s.label, marginBottom:0}}>Featured?</label><input type="checkbox" checked={form.featured} onChange={e => setForm(f => ({...f, featured:e.target.checked}))} style={{width:16, height:16, cursor:"pointer"}}/><span style={{fontSize:12, color:"#666"}}>Shows in featured section on home</span></div></div>
-    <div style={s.formGroup}><label style={s.label}>Content * (Markdown supported)</label><div style={{fontSize:11, color:"#555", marginBottom:6}}>Use # ## ### for headers, **bold**, - for bullets, - [ ] for checkboxes</div><textarea style={s.textarea} value={form.content} onChange={e => setForm(f => ({...f, content:e.target.value}))} placeholder={"# Document Title\n\n## Section Header\n\nYour content here..."}/></div>
-    <div style={{display:"flex", gap:12, alignItems:"center"}}><button className="btn-hover" style={{...s.btn("gold"), padding:"10px 28px", fontSize:14}} onClick={handleSave}><Save size={14}/> {editDoc ? "Save Changes" : "Publish Document"}</button><button className="btn-hover" style={s.btn("ghost")} onClick={() => setView("admin")}>Cancel</button>{saveMsg && <span style={{color:"#5CB85C", fontWeight:600, fontSize:13}}>{saveMsg}</span>}</div>
+    <div style={s.formGroup}><label style={s.label}>Attached File (PDF, Word, Image)</label><div style={{fontSize:11, color:"#555", marginBottom:8}}>Upload a file that staff can view or download. PDFs display inline. You can upload a file AND add text content below, or just one.</div>
+      <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.pptx,.png,.jpg,.jpeg,.gif" style={{display:"none"}} onChange={e => { if (e.target.files[0]) { setPendingFile(e.target.files[0]); } }}/>
+      <div style={{display:"flex", gap:10, alignItems:"center", flexWrap:"wrap"}}>
+        <button type="button" className="btn-hover" style={s.btn("ghost")} onClick={() => fileInputRef.current?.click()}><Plus size={13}/> {pendingFile || form.fileURL ? "Replace File" : "Choose File"}</button>
+        {pendingFile && <span style={{fontSize:13, color:"#5CB85C", fontWeight:600}}>{pendingFile.name} (ready to upload)</span>}
+        {!pendingFile && form.fileURL && <span style={{fontSize:13, color:"#C8952A"}}>{form.fileName} (current)</span>}
+        {(pendingFile || form.fileURL) && <button type="button" className="btn-hover" style={{...s.btn("ghost"), color:"#B03A2E", borderColor:"#B03A2E"}} onClick={() => { setPendingFile(null); setForm(f => ({...f, fileName:"", fileURL:"", fileType:""})); }}><X size={12}/> Remove</button>}
+      </div>
+    </div>
+    <div style={s.formGroup}><label style={s.label}>Content (Markdown supported — optional if file attached)</label><div style={{fontSize:11, color:"#555", marginBottom:6}}>Use # ## ### for headers, **bold**, - for bullets, - [ ] for checkboxes</div><textarea style={s.textarea} value={form.content} onChange={e => setForm(f => ({...f, content:e.target.value}))} placeholder={"# Document Title\n\n## Section Header\n\nYour content here..."}/></div>
+    <div style={{display:"flex", gap:12, alignItems:"center"}}>{uploading ? <div style={{color:"#C8952A", fontWeight:600, fontSize:14}}>Uploading file...</div> : <button className="btn-hover" style={{...s.btn("gold"), padding:"10px 28px", fontSize:14}} onClick={handleSave}><Save size={14}/> {editDoc ? "Save Changes" : "Publish Document"}</button>}<button className="btn-hover" style={s.btn("ghost")} onClick={() => { setPendingFile(null); setView("admin"); }}>Cancel</button>{saveMsg && <span style={{color:"#5CB85C", fontWeight:600, fontSize:13}}>{saveMsg}</span>}</div>
   </div>);
 
   return (
